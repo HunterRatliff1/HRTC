@@ -1,0 +1,434 @@
+---
+title: "HRTC Poster Figures"
+author: "Hunter Ratliff, @HunterRatliff1"
+date: "2/16/2019"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    theme: united
+  pdf_document:
+    toc: yes
+    highlight: tango
+    df_print: kable
+---
+
+If you'd like the source *data*, reach out to the [BHAR](https://www.utmb.edu/bhar/about-us/bhar-team)
+office or DM me on [Twitter](https://twitter.com/HunterRatliff1)
+
+```{r packages, include=F, echo=T}
+knitr::opts_chunk$set(warning=F, message=F)
+# Sys.setenv(TZ="America/Chicago")     
+
+require(MASS)
+require(tidyverse)
+require(lubridate)
+require(readr)
+require(ggplot2)
+require(knitr)
+require(scales)
+library(stargazer)
+
+library(lme4)
+require(survival)
+library(survminer)
+library(survMisc)
+library(pander)
+require(ggrepel)
+require(waffle)
+require(GGally)
+require(jtools)
+
+color_guide <- c("T/F"="#d7601c", 
+                 "Quiz"="#7571b1", 
+                 "MORE"="#e5318a", 
+                 "Hotline"="#269d78", 
+                 "Fact"="#68a52c",
+                 "Fact/Hotline"="#68a52c")
+
+panderOptions("table.alignment.default", "left")
+```
+
+
+```{r setup, include=F, echo=F}
+users <- readRDS("Data/users.RDS") %>%
+  mutate(SurvEnd2 = ifelse(SurvEnd > 135, 135, SurvEnd))
+  
+
+HRTC <- readRDS("Data/MergedDf2.RDS") %>%
+  mutate(Type = ifelse(campg.day %in% c(26), "MORE", Type)) %>% # Recode this hotline as MORE
+  mutate(Type = ifelse(campg.day %in% c(63,82,86,124), "MORE", Type)) %>% # Recode these fact as MORE
+  filter(campg.day < SurvEnd) %>% # remove non-responses if they've opted out
+  filter(Type!="Open-ended") %>% # ignore open ended question
+  group_by(userID) %>% 
+  mutate(userResponses = sum(Replied, na.rm = T)) %>%
+  
+  ungroup() %>%
+  mutate( # recode terms to match poster's terms
+    Type = recode(Type, "Agree/disagree"="T/F"),
+    Type = recode(Type, "Knowledge"="Fact"),
+    Type = recode(Type, "Knowledge w/ more info"="MORE"),
+    Type = recode(Type, "Knowledge w/ EX"="MORE")
+  )
+
+# Not used for the poster, but maybe will use in future
+HRTC[HRTC$mid=="m032",]$Category <- "Partner"
+HRTC[HRTC$mid=="m038",]$Category <- "Partner"
+HRTC[HRTC$mid=="m061",]$Category <- "Abuse/IPV"
+
+HRTC <- HRTC %>%
+  mutate(Tag = Keywords) %>%
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Cyber"), "Cyber", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Consent"), "Consent", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Individuality"), "Individuality", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Stalking"), "Stalking", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Emotional"), "Emotional", Tag))
+
+```
+
+# Bar chart
+
+```{r BarChart}
+HRTC %>% 
+  mutate(Replied = as.character(Replied)) %>%
+  mutate(
+    Replied = recode(Replied, "0"="No"),
+    Replied = recode(Replied, "1"="Yes")
+    ) %>% 
+  count(campg.day, Type, Replied) %>%
+  spread(Replied, n) %>%
+  group_by(Type) %>%
+  summarise(Yes = sum(Yes, na.rm=T), No=sum(No, na.rm=T)) %>%
+  mutate(
+    `Reply %` = Yes/(Yes+No),
+    n         = Yes + No
+  ) %>%
+  rename(Style=Type) %>%
+  
+  ggplot(aes(x=Style, y=`Reply %`, fill=Style)) +
+  geom_col(color="black") +
+  geom_label(aes(y=0, label=percent(`Reply %`), color=Style), fill="white", vjust=0) +
+  scale_fill_manual(values=color_guide, guide=F) +
+  scale_color_manual(values=color_guide, guide=F) +
+  theme_pubclean() + theme(
+    plot.subtitle  = element_text(face="italic", color="#A1A1A1", size=rel(0.9)),
+    plot.caption   = element_text(face="bold", color="#2d6987", size=rel(1))
+  ) +
+  labs(x="", y="Responded (%)", caption = "Fig xyz",
+       title="Percent of participants who responded by\nmessage style") +
+  scale_y_continuous(labels=percent) 
+```
+
+# Graphically represent model
+
+## Coeffs
+
+```{r MakeModel}
+df <- HRTC %>% 
+  filter(userResponses>0) %>%
+  # filter(Type!="Fact", Type!="Hotline") %>%
+  mutate(Category = as.factor(Category)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes"))) 
+  
+
+mod <- glm(Replied ~ Type + grade + race + gender + userResponses + campg.num, 
+           data=df, family=binomial(link = "logit"))
+
+
+# HRTC %>% group_by(Type, BaseMsg, ReplyMsg) %>%
+#   summarise(
+#     Received = n(),
+#     Replied = sum(Replied, na.rm = T),
+#     Replied_percent = round(100*sum(Replied, na.rm = T)/n())
+#   ) %>%
+#   arrange(Type, Received) %>%
+#   readr::write_excel_csv("~/Downloads/Message Types.csv")
+```
+
+```{r MakeCIs}
+# Save df with B (estimate) & CIs (and their exp values)
+x <- cbind(broom::tidy(mod), broom::confint_tidy(mod)) %>%
+  rename(B=estimate, LL=conf.low, UL=conf.high) %>%
+  mutate(expB=exp(B), expLL=exp(LL), expUL=exp(UL)) %>%
+  mutate(
+    VarCat = "",
+    VarCat = ifelse(str_detect(term, "Type"), "Style", VarCat),
+    term   = str_replace(term, "Type", ""),
+    VarCat = ifelse(str_detect(term, "gender"), "Gender", VarCat),
+    term   = str_replace(term, "gender", ""),
+    VarCat = ifelse(str_detect(term, "race"), "Race", VarCat),
+    term   = str_replace(term, "race", ""),
+    VarCat = ifelse(str_detect(term, "grade"), "Grade", VarCat),
+    term   = str_replace(term, "grade", ""),
+    term   = ifelse(VarCat=="Grade", str_c(term, "th"), term),
+    term   = ifelse(term=="Other", str_c(term, VarCat, sep=" "), term)
+  ) %>%
+  dplyr::select(term, VarCat, B, LL, UL, expB, expLL, expUL, everything()) 
+```
+
+```{r plot_Coeff}
+x %>% filter(VarCat!="") %>%
+
+  ggplot(aes(x=term, y=B, color=VarCat)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_point() +
+  geom_errorbar(aes(ymin=LL, ymax=UL), width=.2) +
+  coord_flip() + guides(color=F) + theme_bw() +
+  labs(x="", y="Log-Odds Ratio of responding") +
+  facet_wrap("VarCat", scales="free")
+```
+
+```{r plot_ExpCoeff}
+x %>% filter(VarCat!="") %>%
+  filter(VarCat=="Style") %>%
+
+  ggplot(aes(x=term, y=expB, color=term)) +
+  geom_hline(yintercept = 1, linetype = 1, alpha=1, size=0.75) +
+  geom_point(size=2) +
+  geom_errorbar(aes(ymin=expLL, ymax=expUL), width=.2, size=1) +
+  geom_label_repel(aes(label=round(expB,2)), nudge_x=-0.75, alpha=0.75,
+                   arrow = arrow(length = unit(0.02, "npc")), color="black") + 
+  
+  
+  scale_color_manual(values=color_guide) +
+  scale_y_continuous(breaks=c(1,50,100, 150), minor_breaks = c(0,25,75,125)) +
+  coord_flip() + guides(color=F) + theme_pubclean(flip=T) +
+  theme(panel.grid.minor.x = element_line(linetype = "dotted", 
+                                          color = "grey"),
+        plot.caption       = element_text(face="bold", color="#2d6987", size=rel(1)),
+        plot.subtitle      = element_text(face="italic", color="#A1A1A1", size=rel(0.9))) +
+  labs(x="", y="Odds ratio of responding", title="Odds of responding to message by message style",
+       subtitle='Reference = "Fact" message style', caption = 'Fig xyz') 
+  
+```
+
+```{r plot_ExpCoeff_bi}
+x %>% filter(VarCat!="") %>%
+  filter(VarCat=="Style") %>%
+  filter(term!="Hotline") %>% # only look at bidirectional messages
+
+  ggplot(aes(x=term, y=expB, color=term)) +
+  geom_hline(yintercept = 1, linetype = 1, alpha=1, size=0.75) +
+  geom_point(size=2) +
+  geom_errorbar(aes(ymin=expLL, ymax=expUL), width=.2, size=1) +
+  geom_label_repel(aes(label=round(expB,2)), nudge_x=-0.4, alpha=0.75,
+                   arrow = arrow(length = unit(0.02, "npc")), color="black") + 
+  
+  
+  scale_color_manual(values=color_guide) +
+  scale_y_continuous(breaks=c(1,50,100, 150), minor_breaks = c(25,75,125)) +
+  coord_flip() + guides(color=F) + theme_pubclean(flip=T) +
+  theme(panel.grid.minor.x = element_line(linetype = "dotted", 
+                                          color = "grey"),
+        plot.caption       = element_text(face="bold", color="#2d6987", size=rel(1)),
+        plot.subtitle      = element_text(face="italic", color="#A1A1A1", size=rel(0.9))) +
+  labs(x="", y="Odds ratio of responding", title="Odds of responding to bidirectional message styles",
+       subtitle='Reference = unilateral styles (Fact, Hotline)', caption = 'Fig xyz') 
+  
+```
+
+## Continious
+
+```{r PrRespond_byDay}
+df <- HRTC %>% 
+  filter(userResponses>0) %>%
+  # mutate(Type = ifelse(campg.day==26, "Hotline", Type)) %>% # Change the one hotline question from MORE to hotline
+  mutate(Category = as.factor(Category)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes")))
+
+# Use same model as above, but use `campg.day` instead of `campg.num`
+mod <- glm(Replied ~ Type + grade + race + gender + userResponses + campg.day, 
+           data=df, family=binomial(link = "logit"))
+
+
+## make comparison data....
+jtoolResults <- jtools::make_predictions(mod, pred = "campg.day", return.orig.data=T)
+predictions <- jtoolResults$predictions
+actualData <- jtoolResults$data %>%
+  count(campg.day, Type, Replied) %>%
+  spread(Replied, n) %>%
+  mutate(
+    n = Yes + No,
+    PercentRespond = Yes/n
+  ) %>% left_join(select(count(HRTC, Type, Message, campg.day, campg.num, mid), campg.day, Message))
+rm(jtoolResults, predictions)
+
+
+bind_rows(
+  make_predictions(mod, pred = "campg.day", at=list("Type"="MORE")),
+  make_predictions(mod, pred = "campg.day", at=list("Type"="Quiz")),
+  make_predictions(mod, pred = "campg.day", at=list("Type"="Hotline")),
+  make_predictions(mod, pred = "campg.day", at=list("Type"="T/F")),
+  make_predictions(mod, pred = "campg.day", at=list("Type"="Fact"))
+) %>%
+  
+  ggplot(aes(x=campg.day, y=Replied)) +
+  # geom_ribbon(aes(ymin=ymin, ymax=ymax, fill=Type), alpha=0.15) +
+  geom_line(aes(color=Type)) +
+  scale_fill_manual(values=color_guide, guide=F) +
+  geom_point(aes(x=campg.day, y=PercentRespond, color=Type, shape=Type), 
+             size=2, data=actualData, alpha=0.4) +
+  scale_color_manual(values=color_guide, name="Style") +
+  scale_shape_discrete(name="Style") +
+  guides(
+    colour = guide_legend(override.aes = list(alpha = 1), reverse=T),
+    shape = guide_legend(reverse=T)) +
+  theme_pubclean() + 
+  theme(
+    legend.position= "right",
+    plot.subtitle  = element_text(face="italic", color="#A1A1A1", size=rel(0.9)),
+    plot.caption   = element_text(face="bold", color="#2d6987", size=rel(1))
+  ) +
+  labs(x="Day of Campaign", y="Pr(respond)", caption = "Fig xyz",
+       title="Predicted chance of responding\nby campaign day") +
+  scale_y_continuous(labels=percent) 
+
+rm(actualData)
+
+```
+
+
+# Survival
+
+```{r SurvPlot}
+survObj <- Surv(time=users$SurvEnd2, event=users$Censor)
+SurvPlot <- survfit(survObj ~ 1, data = users) %>%  
+  ggsurv(size.est=1, size.ci=0.5,cens.size=3,
+         lty.ci = 1 # linetype: was 5
+    ) 
+# SurvPlot  ## Plot the GGally plot  
+
+# Make your own plot
+dat <- SurvPlot$data
+dat.cens <- subset(dat, cens != 0)
+dat %>%
+  ggplot(aes(x=time, y=surv)) + 
+  geom_ribbon(aes(ymin=low, ymax=up), alpha=0.25) +
+  geom_step() +
+  geom_point(data=dat.cens, aes(y = surv, color="= Censored"), 
+      shape=3, size=1.5) +
+  # geom_rug(data=count(HRTC, campg.day, Type), sides="b",
+  #        aes(x=campg.day, y=0, color=Type), size=1) +
+  
+  theme_pubclean() + 
+  # theme(legend.position=c(0.5,0.1), legend.direction="horizontal") +
+   theme(
+    legend.position= c(0.2,0.2),
+    plot.subtitle  = element_text(face="italic", color="#A1A1A1", size=rel(0.9)),
+    plot.caption   = element_text(face="bold", color="#2d6987", size=rel(1))
+  ) +
+  scale_y_continuous(labels = scales::percent, limits=c(0.6,1)) +
+  scale_color_manual(values=c("#df382c"), name="") +
+  labs(x="Day of Campaign", y="Subscribed to campaign (%)", caption = "Fig xyz",
+       title = "Retention during the campaign")
+
+# # Autoplot
+# survfit(survObj ~ 1, data = users) %>% 
+#   ggsurvplot(data = users)
+rm(SurvPlot, dat, dat.cens, survObj)
+```
+
+# Demographics
+
+```{r Demographics}
+Demographic <- "race" # gender, grade, race
+df <- semi_join(users, select(HRTC, userID)) %>% 
+  count(!!sym(Demographic)) %>%
+  filter(!is.na(!!sym(Demographic)))
+
+numFactors <- dim(count(df, !!sym(Demographic)))[1]
+if(Demographic=="gender") pal <- suppressWarnings(RColorBrewer::brewer.pal(numFactors, "Set1"))
+if(Demographic=="grade") pal <- suppressWarnings(RColorBrewer::brewer.pal(numFactors, "Spectral"))
+if(Demographic=="race") pal <- suppressWarnings(RColorBrewer::brewer.pal(numFactors, "Dark2"))
+    
+    
+df %>% waffle(legend_pos="bottom", flip=F, colors=pal)
+
+rm(Demographic, numFactors, pal)
+```
+
+
+# Response to message style
+
+```{r actualDataCalc}
+actual <- HRTC %>% 
+  mutate(
+    Type = recode(Type, "Fact"="Fact/Hotline"),
+    Type = recode(Type, "Hotline"="Fact/Hotline")
+    ) %>%
+  mutate(Replied = as.character(Replied)) %>%
+  mutate(Type = ifelse(campg.day==26, "MORE", Type)) %>%
+  mutate(
+    Replied = recode(Replied, "0"="No"),
+    Replied = recode(Replied, "1"="Yes")
+    ) %>% 
+  count(campg.day, Type, Replied, mid) %>%
+  spread(Replied, n) %>%
+  group_by(Type, campg.day, mid) %>%
+  summarise(Yes = sum(Yes, na.rm=T), No=sum(No, na.rm=T)) %>%
+  mutate(
+    `Reply %` = Yes/(Yes+No),
+    n         = Yes + No
+  )
+
+actual %>% 
+  ggplot(aes(x=campg.day, y=`Reply %`, color=Type)) +
+  # geom_col(aes(fill=Type)) +
+  # geom_step() +
+  geom_point() + geom_smooth(aes(fill=Type)) +
+  facet_wrap("Type") +
+  theme_pubclean() +
+  theme(legend.position="bottom") +
+  scale_y_continuous(labels=percent, limits = c(0,0.5), oob=scales::squish) +
+  scale_color_manual(values=color_guide, name="Style") +
+  scale_fill_manual(values=color_guide, name="Style") +
+  
+  labs(x="Days into campaign", y="Responded (%)")
+```
+
+```{r ModelPredictCalc}
+dfModel <- HRTC %>% 
+  filter(userResponses>0) %>%
+  mutate(Dummy = as.factor(zipcode)) %>%
+  mutate(userID = as.factor(userID)) %>%
+  mutate(Category = as.factor(Category)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes")))
+
+mod <- glm(Replied ~ Type + userResponses + campg.num, 
+           data=dfModel, family=binomial(link = "logit"))
+
+newDf <- data.frame(
+  userResponses = rep(mean(dfModel$userResponses),5),
+  campg.num     = rep(mean(dfModel$campg.num),5),
+  Type          = unique(dfModel$Type)
+)
+
+cbind(newDf, predict(mod, newdata=newDf, type="response", se.fit=TRUE)) %>%
+  rename(prob=fit, se.prob=se.fit) %>%
+  mutate(
+    ll = prob - 1.96*se.prob,
+    ul = prob + 1.96*se.prob,
+  ) %>%
+  ggplot(aes(x=Type, y = prob)) +
+  geom_col(aes(fill=Type)) +
+  geom_errorbar(aes(ymin = ll, ymax = ul), width = 0.2, lty=1, lwd=1) +
+  # geom_point(shape=18, size=3, fill="black") +
+  geom_point(aes(x=Type, y=`Reply %`), data=actual) +
+  scale_color_discrete(name="Message Style") + 
+  scale_fill_discrete(name="Message Style") + 
+  scale_y_continuous(labels=percent) +
+  labs(title= " Predicted probabilities", x="Question Type", y="Pr(respond to message)")
+
+rm(dfModel, mod, newDf)
+rm(actual)
+```
+
+# Session info
+
+```{r Sessioninfo}
+pander(sessionInfo())
+```
+

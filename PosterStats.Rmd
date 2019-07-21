@@ -1,0 +1,516 @@
+---
+title: "HRTC Stats"
+author: "Hunter Ratliff, @HunterRatliff1"
+date: "1/25/2019"
+output:
+  html_document:
+    theme: united
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    df_print: kable
+    highlight: tango
+    toc: yes
+---
+
+If you'd like the source *data*, reach out to the [BHAR](https://www.utmb.edu/bhar/about-us/bhar-team)
+office or DM me on [Twitter](https://twitter.com/HunterRatliff1)
+
+```{r setup, include=T, echo=T, collapse=T, warning=F, message=F}
+knitr::opts_chunk$set(warning=F, message=F, echo=T)
+
+require(MASS)
+require(tidyverse)
+require(lubridate)
+require(readr)
+require(ggplot2)
+require(knitr)
+require(scales)
+library(stargazer)
+
+library(lme4)
+require(survival)
+library(survminer)
+library(survMisc)
+library(pander)
+
+panderOptions("table.alignment.default", "left")
+
+users <- readRDS("Data/users.RDS") %>%
+  mutate(SurvEnd2 = ifelse(SurvEnd > 135, 135, SurvEnd))
+  
+
+HRTC <- readRDS("Data/MergedDf2.RDS") %>%
+  mutate(Type = ifelse(campg.day %in% c(26), "Knowledge w/ EX", Type)) %>% # Recode this hotline as MORE
+  mutate(Type = ifelse(campg.day %in% c(63,82,86,124), "Knowledge w/ EX", Type)) %>% # Recode this fact as MORE
+  filter(campg.day < SurvEnd) %>% 
+  filter(Type!="Open-ended") %>%
+  group_by(userID) %>% 
+  mutate(userResponses = sum(Replied, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(
+    Type = recode(Type, "Agree/disagree"="T/F"),
+    Type = recode(Type, "Knowledge w/ more info"="Knowledge w/ EX")
+  )
+
+
+user.ids <- sample_n(count(HRTC, userID),10)$userID
+
+HRTC[HRTC$mid=="m032",]$Category <- "Partner"
+HRTC[HRTC$mid=="m038",]$Category <- "Partner"
+HRTC[HRTC$mid=="m061",]$Category <- "Abuse/IPV"
+
+HRTC <- HRTC %>%
+  mutate(Tag = Keywords) %>%
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Cyber"), "Cyber", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Consent"), "Consent", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Individuality"), "Individuality", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Stalking"), "Stalking", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Emotional"), "Emotional", Tag))
+
+```
+
+
+
+```{r MakeConTable}
+df <- HRTC %>% 
+  mutate(Replied = as.character(Replied)) %>%
+  mutate(
+    Replied = recode(Replied, "0"="No"),
+    Replied = recode(Replied, "1"="Yes")
+    ) %>% 
+  count(campg.day, Type, Replied) %>%
+  spread(Replied, n) %>%
+  group_by(Type) %>%
+  summarise(Yes = sum(Yes, na.rm=T), No=sum(No, na.rm=T)) %>%
+  mutate(
+    `Reply %` = Yes/(Yes+No),
+    n         = Yes + No
+  )
+
+conTable <- as.table(rbind(df$Yes, df$No))
+dimnames(conTable) <- list(Replied = c("Yes", "No"),
+                           qType = df$Type)
+```
+
+# Graph of response rate to each question type
+
+Here's just an overview of the crude percent of people who responded to each 
+question type:
+
+```{r qType_table}
+df %>% mutate(`Reply %` = percent(`Reply %`)) %>% kable()
+```
+
+```{r qType_graph, fig.height=4}
+df %>% ggplot(aes(x=Type, y=`Reply %`, fill=n)) +
+  geom_col() +
+  ggthemes::scale_fill_continuous_tableau(palette = "Blue") + 
+  scale_y_continuous(labels=percent) + coord_flip()
+```
+
+
+
+
+
+# \textcolor{red}{Chi-Squared}
+
+**TODO:** Effect size..?
+
+## Contengency table 
+
+Contengency table of responded (yes, no) vs the type of question
+
+```{r conTable}
+kable(conTable)
+```
+
+
+## Test Results
+
+Here's the test results
+
+```{r chiSquared, echo=T, collapse=T}
+chisq.test(conTable)
+chisq.test(conTable, simulate.p.value = TRUE, B = 10000)
+```
+
+```{r chiSquaredPlot, eval=F}
+fifer::chisq.plot(conTable)
+```
+
+
+
+## Residuals
+
+```{r residualsChi2}
+chisq.test(conTable)$residuals %>%
+  round(2) %>% kable()
+```
+
+## Post-hoc analysis
+
+Using Fisher's Exact. Agrees nicely with the results from the logistic regression (next section)
+
+```{r postHoc_bonferroni}
+fifer::chisq.post.hoc(t(conTable), control = "bonferroni", digits = 8) %>% pander()
+```
+
+```{r postHoc_fdr}
+## Fisher's Exact
+# fisher.test(conTable,simulate.p.value=TRUE,B=1e7)
+fifer::chisq.post.hoc(t(conTable), control = "fdr", digits = 8) %>% pander()
+```
+
+
+
+
+# \textcolor{red}{Binomial}
+
+Note: These regressions are run on students who responded **at least** once
+
+Some resources for binomal regression (for my reference):
+
+* [Logit / Probit](https://www.princeton.edu/~otorres/LogitR101.pdf)
+* [Multilevel Modeling in R](https://rpubs.com/rslbliss/r_mlm_ws) 
+* [Intro to Generalized linear mixed models](https://stats.idre.ucla.edu/r/dae/mixed-effects-logistic-regression/)
+
+## \textcolor{blue}{Logit model}
+
+Run a bimodal regression based on `Question type` + `grade` + `race` + `gender` 
++ `number of user's responses` + `Campaign number`  (e.g. is it the first message 
+sent, second sent, last message sent in the campaign). 
+*In the future, can look at how category and/or keywords play into this.*
+
+The next table (\textcolor{blue}{Table 6}) shows the model in a more pretty table 
+format. \textcolor{blue}{Table 7} shows the same model, but with an output more
+similar to SPSS. 
+
+```{r Bimodal}
+df <- HRTC %>% 
+  filter(userResponses>0) %>%
+  # filter(Type!="Knowledge") %>%
+  mutate(Dummy = as.factor(zipcode)) %>%
+  mutate(userID = as.factor(userID)) %>%
+  mutate(Category = as.factor(Category)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes")))
+
+mod <- glm(Replied ~ Type + grade + race + gender + userResponses + campg.num, 
+           data=df, family=binomial(link = "logit"))
+# round(exp(coef(mod)),4)
+```
+
+
+```{r bimodalPander}
+pander(mod)
+```
+
+```{r bimodalSPSSpander, eval=T}
+# summary(mod)
+mod.table <- as.data.frame(summary(mod)$coefficients) %>%
+  mutate(`Exp(Estimate)` = exp(Estimate))
+
+mod.exp.ci <- exp(confint(mod)) # Using MASS package
+
+x <- cbind(mod.table, mod.exp.ci) %>%
+  rownames_to_column() %>%
+  mutate_if(is.double, round, 4) %>%
+  rename(`Exp(B) Lower95CI`=`2.5 %`) %>%
+  rename(`Exp(B) Upper95CI`=`97.5 %`) %>%
+  column_to_rownames() %>%
+  as.matrix()
+
+# mod.summary <- summary(mod)
+# mod.summary$coefficients <- x
+# mod.summary
+pander(x)
+rm(mod.table, mod.exp.ci, x)
+```
+
+```{r bimodalStar, results='asis', eval=F}
+stargazer(mod, type='latex', title="Log-odds",
+          single.row=T, intercept.top=T, intercept.bottom=F)
+```
+
+```{r modelStarExp, results='asis', eval=F}
+# stargazer(mod, coef=list(exp(coef(mod))), p.auto=FALSE, type = 'latex', 
+#           single.row=T, intercept.top=T, intercept.bottom=F, title="Exponential Log odds")
+stargazer(mod, apply.coef=exp, apply.se=exp, type="latex", p.auto=F, 
+          single.row=T, intercept.top=T, intercept.bottom=F, title="Exponential of Log odds")
+```
+
+```{r bimodalOutput, eval=F}
+summary(mod)
+```
+
+
+```{r mod_plots, fig.height=7, eval=F}
+anova(mod, test="Chisq") #see ?anova.glm
+par(mfrow = c(2, 2))
+plot(mod)
+```
+
+### Prediction 
+
+Based on modeling only the significant variables from above, which has a higher 
+AIC (second model's AIC=`12,331`) than the model above (AIC=`8,090`). Note that
+the figure shows three points in time (beginning, midpoint, and end), but assumes
+`userResponses` is the same across the board
+
+
+```{r predict_mod2}
+mod2 <- glm(Replied ~ Type + userResponses + campg.num, 
+           data=df, family=binomial(link = "logit"))
+
+newDf <- data.frame(
+  userResponses = rep(mean(df$userResponses),15),
+  campg.num     = c(rep(min(df$campg.num),5), rep(mean(df$campg.num),5), rep(max(df$campg.num),5)),
+  Time          = c(rep("Start",5), rep("Midpoint",5), rep("End",5)),
+  Type = rep(unique(df$Type),3)
+)
+
+cbind(newDf, predict(mod2, newdata=newDf, type="response", se.fit=TRUE)) %>%
+  rename(prob=fit, se.prob=se.fit) %>%
+  mutate(
+    ll = prob - 1.96*se.prob,
+    ul = prob + 1.96*se.prob,
+  ) %>%
+  ggplot(aes(x=Type, y = prob)) +
+  geom_errorbar(aes(ymin = ll, ymax = ul, color=Time), width = 0.2, lty=1, lwd=1) +
+  geom_point(shape=18, size=3, fill="black") +
+  scale_color_discrete(name="Time during campaign") + 
+  labs(title= " Predicted probabilities", x="Question Type", y="Pr(respond to message)") 
+
+rm(newDf, mod2)  
+```
+
+
+
+## \textcolor{blue}{Multilevel logit model}
+
+The next output below models the **fixed effects** of variables of interest 
+(e.g. question type) while  accounting for **random effects** (`userID`). Note: 
+the model doesn't converge  if gender, race, or grade is included, presumably 
+because those effects are  accounted for in the random effects of the userID
+
+```{r Multilevel_logit}
+df <- HRTC %>% 
+  filter(userResponses>0) %>%
+  mutate(Dummy = as.factor(zipcode)) %>%
+  mutate(userID = as.factor(userID)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes")))
+
+multiMod <- glmer(Replied ~ Type + (1 | userID), 
+                  data=df, family=binomial(link = "logit"))
+                  # control=glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 10000)))
+  
+summary(multiMod)
+
+# Basic        AIC = 11,174
+# Gender       AIC = 8,037
+# Grade        AIC = 7,861 (no convergence)
+# Race         AIC = 8,105 (no convergence)
+# Gender grade AIC = 7,574 (no convergence)
+```
+
+```{r multiMod_plots, eval=F}
+plot(multiMod)
+lattice::qqmath(multiMod)
+```
+
+```{r multiModel_predict, eval=F}
+# Consider using broom::augment.glm()
+newDf <- data.frame(
+  userID = unique(df$userID),
+  Type = rep(unique(df$Type),414)
+)
+
+cbind(newDf, prob=predict(multiMod, newdata=newDf)) %>%
+  mutate(prob= exp(prob)) %>%
+  filter(prob<1) %>%
+  ggplot(aes(x=Type, y=prob)) + geom_boxplot(varwidth=T)
+
+```
+
+
+# \textcolor{red}{Survival analysis}
+
+Some resources for survival analysis (for my reference):
+
+* [Comparing survival times between groups](https://www.emilyzabor.com/tutorials/survival_analysis_in_r_tutorial.html#comparing_survival_times_between_groups)
+
+
+
+
+```{r survOverall, include=F}
+survObj <- Surv(time=users$SurvEnd2, event=users$Censor)
+
+survfit(survObj ~ 1, data = df) %>% summary() # End of campaign day 128
+
+summary(survfit(survObj ~ 1, data = df))
+
+summary(survfit(survObj ~ 1, data = df), times=26)  # Half of those who will drop out, have dropped out
+summary(survfit(survObj ~ 1, data = df), times=65)  # midpoint of campaign
+summary(survfit(survObj ~ 1, data = df), times=131) # End of campaign
+
+```
+
+
+## Gender
+
+```{r survGender, fig.height=9}
+df <- users %>%
+  filter(gender!="Other")
+survObj <- Surv(time=df$SurvEnd2, event=df$Censor)
+
+survfit(survObj ~ gender, data = df) %>%
+  ggsurvplot(data = df, pval=T, #conf.int=T,
+             risk.table = TRUE,
+             fun = "pct",
+             size = 1,
+             legend = "bottom")
+  
+  # ggsurv() + 
+  # scale_y_continuous(labels = scales::percent) +
+  # scale_x_continuous(name="Days into campaign") + 
+  # scale_color_brewer(palette="Set2", na.value = "grey50")
+```
+
+## Grade
+
+```{r survGrade, fig.height=9}
+df <- users  %>%
+  filter(grade!="other")
+survObj <- Surv(time=df$SurvEnd2, event=df$Censor)
+
+survfit(survObj ~ grade, data = df) %>%
+  ggsurvplot(data = df, pval=T, #conf.int=T,
+             risk.table = TRUE,
+             fun = "pct",
+             size = 1,
+             legend = "bottom")
+```
+
+## Race
+
+```{r survRace, fig.height=9}
+df <- users 
+survObj <- Surv(time=df$SurvEnd2, event=df$Censor)
+
+survfit(survObj ~ race, data = df) %>%
+  ggsurvplot(data = df, pval=T, #conf.int=T,
+             risk.table = TRUE,
+             fun = "pct",
+             size = 1,
+             legend = "bottom")
+```
+
+## Combo
+
+```{r survCombo, eval=F}
+df <- users  %>%
+  filter(grade!="other", gender!="Other")
+survObj <- Surv(time=df$SurvEnd2, event=df$Censor)
+
+# Fit a Cox proportional hazards model
+coxph(survObj ~ grade + race, data=df) %>% summary()
+
+```
+
+
+```{r SPSS_export, eval=F}
+# Export to SPSS
+# HRTC %>% filter(userResponses>1) %>% select(userID, message_id, Type, mid, Replied:userResponses) %>% write_csv("~/Downloads/data.csv")
+```
+
+
+# \textcolor{red}{Descriptive statistics}
+
+So there's quite a few `NA`'s (people who didn't have their gender, grade, or race 
+recorded). A few people did respond to the gender & grade questions, but didn't
+fit into a larger category, so I dropped them from the analysis (total of 7 students)
+
+Total number of students: <b>`r length(count(HRTC, userID)$userID)`</b>
+
+## Gender
+
+```{r gender}
+users %>% 
+  semi_join(count(HRTC, userID)) %>%
+  count(gender, sort=T) %>% 
+  
+  mutate(sansNA = ifelse(is.na(gender),0,n)) %>%
+  mutate(gender = ifelse(is.na(gender),"NA",as.character(gender))) %>%
+  filter(gender!="Other") %>%
+  mutate(sansNA = percent(sansNA/sum(sansNA))) %>%
+  mutate(Percent = percent(n/sum(n))) %>% 
+  
+  # select(gender, n, Percent, sansNA) %>%
+  kable()
+```
+
+
+## Grade
+
+```{r grade}
+
+users %>% 
+  semi_join(count(HRTC, userID)) %>%
+  count(grade, sort=T) %>% 
+  
+  mutate(sansNA = ifelse(is.na(grade),0,n)) %>%
+  mutate(grade = ifelse(is.na(grade),"NA",as.character(grade))) %>%
+  filter(grade!="other") %>%
+  mutate(sansNA = percent(sansNA/sum(sansNA))) %>%
+  mutate(Percent = percent(n/sum(n))) %>% 
+  
+  kable()
+
+```
+
+
+## Race
+
+Note that unlike gender & grade, I didn't drop the `Other` race because it's
+representing `Two or more races`
+
+```{r race}
+users %>% 
+  semi_join(count(HRTC, userID)) %>%
+  count(race, sort=T) %>% 
+  
+  mutate(sansNA = ifelse(is.na(race),0,n)) %>%
+  mutate(race = ifelse(is.na(race),"NA",as.character(race))) %>%
+  mutate(sansNA = percent(sansNA/sum(sansNA))) %>%
+  mutate(Percent = percent(n/sum(n))) %>% 
+  
+  kable()
+```
+
+Compare to [Census data](https://www.census.gov/quickfacts/fact/table/galvestoncitytexas,US/RHI725217) 
+(2017 ACS 5-year estimates) from Galveston County:
+
+
+```{r ACS}
+
+data_frame(
+  Race = c("White (non-Hispanic)", "Hispanic or Latino",
+           "Black or African American", "Asian", "Two or more races", 
+           "American Indian and Alaska Native"),
+  Percent = c(0.459, 0.287, 0.208, 0.032, 0.025, 0.005)
+) %>%
+  mutate(Percent = percent(Percent)) %>%
+  # arrange(desc(Percent))
+  kable()
+
+```
+
+
+# Session info
+
+```{r Sessioninfo}
+pander(sessionInfo())
+```
+

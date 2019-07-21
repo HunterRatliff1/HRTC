@@ -1,0 +1,179 @@
+---
+title: "HRTC Regressions"
+author: "Hunter Ratliff, htratlif@utmb.edu"
+date: "2/6/2019"
+output:
+  pdf_document:
+    toc: yes
+    highlight: tango
+    df_print: kable
+  html_document:
+    toc: yes
+    toc_float: yes
+    theme: united
+---
+
+```{r setup, include=F, echo=F}
+knitr::opts_chunk$set(warning=F, message=F, echo=F)
+
+require(tidyverse)
+require(MASS)
+require(lubridate)
+require(readr)
+require(ggplot2)
+require(knitr)
+require(scales)
+library(stargazer)
+library(lme4)
+require(survival)
+library(survminer)
+library(survMisc)
+library(pander)
+
+panderOptions("table.alignment.default", "left")
+
+users <- readRDS("Data/users.RDS") %>%
+  mutate(SurvEnd2 = ifelse(SurvEnd > 135, 135, SurvEnd))
+  
+
+HRTC <- readRDS("Data/MergedDf2.RDS") %>%
+  filter(campg.day < SurvEnd) %>% 
+  filter(Type!="Open-ended") %>%
+  group_by(userID) %>% 
+  mutate(userResponses = sum(Replied, na.rm = T)) %>%
+  # filter(gender!="Other", grade!="other") %>% instead of filtering, make NA
+  ungroup() %>%
+  mutate(
+    Type = recode(Type, "Agree/disagree"="T/F"),
+    Type = recode(Type, "Knowledge w/ more info"="Knowledge w/ EX")
+  )
+
+user.ids <- sample_n(count(HRTC, userID),10)$userID
+
+HRTC[HRTC$mid=="m032",]$Category <- "Partner"
+HRTC[HRTC$mid=="m038",]$Category <- "Partner"
+HRTC[HRTC$mid=="m061",]$Category <- "Abuse/IPV"
+
+HRTC <- HRTC %>%
+  mutate(Tag = Keywords) %>%
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Cyber"), "Cyber", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Consent"), "Consent", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Individuality"), "Individuality", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Stalking"), "Stalking", Tag)) %>% 
+  mutate(Tag = ifelse(stringr::str_detect(Tag, "Emotional"), "Emotional", Tag))
+
+```
+
+# Graphically represent coeffs
+
+```{r MakeModel}
+df <- HRTC %>% 
+  filter(userResponses>0) %>%
+  mutate(Category = as.factor(Category)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes")))
+
+mod <- glm(Replied ~ Type + grade + race + gender + userResponses + campg.num, 
+           data=df, family=binomial(link = "logit"))
+
+```
+
+```{r MakeCIs}
+# Save df with B (estimate) & CIs (and their exp values)
+x <- cbind(broom::tidy(mod), broom::confint_tidy(mod)) %>%
+  rename(B=estimate, LL=conf.low, UL=conf.high) %>%
+  mutate(expB=exp(B), expLL=exp(LL), expUL=exp(UL)) %>%
+  mutate(
+    VarCat = "",
+    VarCat = ifelse(str_detect(term, "Type"), "Style", VarCat),
+    term   = str_replace(term, "Type", ""),
+    VarCat = ifelse(str_detect(term, "gender"), "Gender", VarCat),
+    term   = str_replace(term, "gender", ""),
+    VarCat = ifelse(str_detect(term, "race"), "Race", VarCat),
+    term   = str_replace(term, "race", ""),
+    VarCat = ifelse(str_detect(term, "grade"), "Grade", VarCat),
+    term   = str_replace(term, "grade", ""),
+    term   = ifelse(VarCat=="Grade", str_c(term, "th"), term),
+    term   = ifelse(term=="Other", str_c(term, VarCat, sep=" "), term)
+  ) %>%
+  dplyr::select(term, VarCat, B, LL, UL, expB, expLL, expUL, everything()) 
+```
+
+```{r plot_Coeff}
+x %>% filter(VarCat!="") %>%
+
+  ggplot(aes(x=term, y=B, color=VarCat)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_point() +
+  geom_errorbar(aes(ymin=LL, ymax=UL), width=.2) +
+  coord_flip() + guides(color=F) + theme_bw() +
+  labs(x="", y="Log-Odds Ratio of responding") +
+  facet_wrap("VarCat", scales="free")
+```
+
+```{r plot_ExpCoeff}
+x %>% filter(VarCat!="") %>%
+
+  ggplot(aes(x=term, y=expB, color=VarCat)) +
+  geom_hline(yintercept = 1, linetype = 2) +
+  geom_point() +
+  geom_errorbar(aes(ymin=expLL, ymax=expUL), width=.2) +
+  coord_flip() + guides(color=F) + theme_bw() +
+  labs(x="", y="Odds Ratio of responding") +
+  facet_wrap("VarCat", scales="free")
+```
+
+# Other plots
+
+```{r}
+HRTC %>%
+  group_by(Category, Tag, mid, Type) %>%
+  summarise(
+    n = n(),
+    Replied = sum(Replied, na.rm=T),
+    Pct = Replied / n
+  ) %>%
+  ggplot(aes(x=mid, y=Pct)) + 
+  geom_col(aes(fill=Category)) +
+  coord_flip()
+```
+
+Try some other GLMs
+
+```{r}
+df <- HRTC %>% 
+  filter(userResponses>0) %>%
+  mutate(userID = as.factor(userID)) %>%
+  mutate(Category = as.factor(Category)) %>%
+  mutate(Tag = as.factor(Tag)) %>%
+  mutate(Replied = ifelse(Replied==1, "Yes", "No")) %>%
+  mutate(Replied = factor(Replied, levels=c("No","Yes")))
+
+glm(Replied ~ Type + Tag + userResponses + campg.num, 
+         data=df, family=binomial(link = "logit")) %>%
+  summary()
+```
+
+
+See if response to `type` predicts user subscribed status
+
+```{r}
+HRTC %>% count(ReplyType)
+HRTC %>% count(Censor, SurvEnd) %>% filter(Censor==1)
+users %>% count(status.user) 
+users %>% ggplot(aes(x=SurvEnd2, fill=Censor)) + geom_histogram() + facet_wrap("status.user")
+```
+
+```{r}
+df <- HRTC %>% group_by(userID) %>% 
+  summarise(userResponses = sum(Replied, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::select(userID, userResponses) %>%
+  right_join(users) 
+
+df %>%
+  ggplot(aes(x=userResponses, fill=status.user)) + geom_histogram()
+
+lm(SurvEnd ~ userResponses, data=df) %>% summary()
+```
+
