@@ -1,0 +1,13 @@
+name: hrtc
+title: HRTC
+username:
+account: hunterratliff1
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 625073
+bundleId: 1827947
+url: https://hunterratliff1.shinyapps.io/hrtc/
+when: 1548114682.6687
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: DataWrangle.nb.html|DataWrangle.Rmd|message-message_id.csv|Survival.R|wrangle.R|Data/~$msgSchedule.xlsx|Data/MergedDf.csv|Data/MergedDf2_with phone_nums.RDS|Data/msgSchedule.xlsx|Data/responsesWithSchedule.csv|Data/responsesWrangle.csv

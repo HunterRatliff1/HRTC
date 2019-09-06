@@ -1,0 +1,282 @@
+---
+title: "Wrangling in the data from the website"
+output: html_notebook
+---
+
+```{r LoadPackages, eval=F}
+require(tidyverse)
+require(lubridate)
+require(readr)
+```
+
+# Read in the data
+
+First login to [the website](https://secure.mcommons.com/login) using Liz's info. 
+On the far-left side, click on the second icon “text messaging” → campaigns → 
+click on Bullying & Relationships (is our main one to look at stats there.) 
+Finally, click **full report** 
+
+You'll be downloading 3 CSV's. First, lets do the two large CSV's located under 
+*Messaging Statistics*. The one that takes the longest is **Sent**, and we'll
+save it as a dataframe called `sent`
+
+```{r sent, eval=F}
+sent <- read_csv("~/Downloads/bullying_relationships_sent_20190111_100200.csv")
+sent <- sent %>%
+  select(phone_number:message_id) %>%
+  select(-shortcode, -id, -direction) %>%
+  rename(msgSent=body, date.sent=when, msgType.sent=message_type, status.sent=status) %>%
+  filter(!is.na(message_id)) # filter out messages w/o ID (e.g. help messages)
+```
+
+Next let's do **Received** and name it `received`
+
+```{r received, eval=F}
+received <- read_csv("~/Downloads/bullying_relationships_received_20190111_102722.csv")
+received <- received %>%
+  select(phone_number:message_id) %>% 
+  select(-shortcode, -id) %>%
+  rename(Response=body, date.rec=when, msgType.rec=message_type, status.rec=status) %>%
+  ## This filters out bad data (those who responded x or more times to one message)
+  add_count(phone_number, message_id, sort=T) %>%
+  filter(n<3) %>% select(-n) #  x=3
+        # You can plot a histogram of n to determine better cutoffs
+        # > Histogram code
+        #   count(received, phone_number, message_id) %>% 
+        #   ggplot(aes(x=n)) + geom_histogram() 
+```
+
+So far, we've been able to handle this using R alone, and haven't needed to edit 
+the CSV itself. For the `users` dataframe, we'll want to download the CSV for
+**All Profiles** under the *Campaign Statistics* section, and manually edit the
+CSV before reading it into R. So before running the next step, manually recode 
+the columns below (in the CSV) to be a clean set of factors
+
+```
+COLUMN: aaGradeLevel
+  7, 8, 9, 10, 11, 12
+```
+
+```
+COLUMN: aaRace
+  1 - Hispanic
+  2 - White (non-Hispanic)
+  3 - Black
+  4 - Asian (or Pacific Islander)
+  5 - AmInd/AkN (American Indian or Alaska Native)
+  6 - Other (or more than one race)
+```
+
+```
+COLUMN: aaGender
+  1 - Male
+  2 - Female
+  3 - Other
+```
+
+Now we're ready to read in the `users` dataframe. **Be sure to update the date** you pulled
+that data from in the code below.
+
+```{r users, eval=F}
+users <- read_csv("~/Downloads/utmb_secondary_bullying_relationships_profiles_20190111_130142.csv") %>%
+  select(userID=id, phone_number, status.user=status, date.join=created_at,
+         date.exit=opted_out_at, zipcode=geocoded_postal_code,
+         gender=aaGender, grade=aaGradeLevel, race=aaRace) %>%
+  
+  mutate(status.user = ifelse(status.user=="Active Subscriber", "Active Subscriber", "Undeliverable / Opt out")) %>%
+  mutate(
+    date.join = as.Date(mdy_hm(date.join)),
+    date.exit = as.Date(mdy_hm(date.exit)),
+    gender    = as.factor(gender),
+    grade     = as.factor(grade),
+    race      = as.factor(race),
+    status.user = as.factor(status.user)
+  )  %>%
+  mutate(Censor = ifelse(is.na(date.exit), 0, 1)) %>% # Add in some rough censored data
+  mutate(date.exit = ifelse(is.na(date.exit),ymd("2019-01-11"), date.exit)) %>%
+  mutate(date.exit = as.Date(date.exit, origin=lubridate::origin)) %>%
+  mutate(SurvEnd = as.numeric(as.duration(interval(date.join, date.exit)), "days"))
+```
+
+# Start joining data
+
+Now it's time to start putting everything together. First, we'll *left_join* the 
+`received` df to the `sent` df. This will return all rows from `received`, and all 
+columns from `received` and `sent`. Rows in `received` with no match in `sent` 
+will have NA values in the new columns. If there are multiple matches between 
+`received` and `sent`, all combinations of the matches are returned.
+
+The block below writes a CSV called `responsesWrangle.csv` that you'll want to 
+edit in the next step. Be careful to not accidently overwite the edited CSV
+
+```{r responses, eval=F}
+# Left join received to sent
+responses <- left_join(
+  mutate(received, date=as.Date(date.rec)), # Make these dates, not datetimes
+  mutate(sent, date=as.Date(date.sent))
+) %>%
+  # Drop some useless columns
+  select(-date.sent, -date.rec, -direction, -status.rec, -status.sent) %>%
+  
+  # Filter out the opt in messages
+  filter(message_id!=34449472, message_id!=34449475, message_id!=34449469, 
+         message_id!=34449469, message_id!=34435006) %>%
+  unique() %>%
+  
+  # tally up the number or responses per message_id per phone number
+  # ideally, this should be 1
+  add_count(phone_number, message_id, sort=T) %>%
+  arrange(desc(n), message_id, phone_number) %>%
+  
+  # reorder the columns and export as csv
+  select(phone_number, message_id, n, msgSent, 
+         Response,  msgType.rec,
+         everything())
+
+###  Be careful to not run this by accident, as you need to manually clean up
+###  this CSV in the next step
+# responses %>% write_csv("Data/responsesWrangle.csv")  
+```
+
+Now open up that CSV and look at all the rows with n>1. Try to make it where each 
+pair of message_id + phone_number only has one response by deleting rows in the CSV.
+Save the same file in the same location and read it back in as `responses`. 
+
+Also, make sure that the n column is equal to 1, and if not, clean up the CSV again
+
+```{r responsesRead, eval=F}
+responses <- read_csv("Data/responsesWrangle.csv") %>% select(-n) 
+
+# Make sure n=1
+responses %>%
+  count(phone_number, message_id, sort=T)
+
+```
+
+Now this part may not be as reproducible in the future, but I made an Excel doc
+with the `message_id` matching up to the `mid`, correct answer, `Msg Type`, 
+`Category`, `Keywords`, `mid`, `ReplyMsg`, and position in the campaign. This 
+was done by hand, but can be done quicker by exporting a CSV of the 
+**Show All Cms Rows** table (found at the bottom of the campaign page), but be 
+sure to fill in the `message_id` from the `responses` table, not the id provided
+by the export. I then had to find the matching **mid** from the master Excel doc,
+and copy paste most columns over by hand. I also had to fill out the correct answer
+column by hand.
+
+So let's read in that **msgSchedule** doc
+
+```{r msgSchedule, eval=F}
+msgSchedule <- readxl::read_excel("Data/msgSchedule.xlsx")
+```
+
+Now we'll do two steps: (1) create NA responses for each question the user didn't
+reply to, and (2) join the responses to our msgSchedule data. Finally we'll save 
+this as a CSV that we can clean up in the next step (same as above, take care to
+not accidently overwite the edited CSV)
+
+```{r write_responsesWithSchedule, eval=F}
+responsesWithSchedule <- responses %>% 
+  # This makes all non responses NA (before they just weren't on the table)
+  select(phone_number, message_id, Response) %>% 
+  reshape2::dcast(phone_number~message_id) %>% 
+  gather(message_id, Response, -phone_number) %>% 
+  as.tbl() %>%
+  
+  # Add back in the date sent
+  mutate(message_id = as.integer(message_id)) %>% 
+  left_join(select(responses, phone_number, message_id, date, msgType.rec)) %>%
+  
+  # Only keep rows that match a message_id in `msgSchedule`, then join them
+  semi_join(msgSchedule) %>%
+  inner_join(msgSchedule)
+  
+###  Be careful to not run this by accident, as you need to manually clean up
+###  this CSV in the next step
+# responsesWithSchedule %>% write_csv("Data/responsesWithSchedule.csv")    
+  
+```
+
+Now is the fun part: Edit that CSV to make all the answers pretty. It's easiest 
+to do in Excel (edit it as a CSV), by filtering out the NA responses. This step
+takes a while
+
+After you've cleaned up the responses, read back in that CSV, and calculate some variables
+
+```{r read_responsesWithSchedule, eval=F}
+responsesWithSchedule <- suppressMessages(read_csv("Data/responsesWithSchedule.csv")) %>%
+  # Fix the NA's and new lines
+  mutate(Category = na_if(Category, "N/A")) %>%
+  mutate(Keywords = na_if(Keywords, "N/A")) %>%
+  mutate(mid      = na_if(mid, "N/A"))  %>%
+  mutate(Category = str_replace(Category, "\r\n", " ")) %>%
+  mutate(Keywords = str_replace(Keywords, "\r\n", " ")) %>%
+  
+  # Make variables to be the right type
+  mutate(CorAns = as.character(CorAns)) %>%
+  mutate(date     = mdy(date)) %>%
+  
+  # Calculate some varibles
+  mutate(Replied = ifelse(!is.na(Response), 1, 0)) %>%
+  mutate(gotRight = ifelse(Response==CorAns, 1, 0)) %>%
+  
+  left_join(
+    data_frame(Number    = c(1:56),
+           campg.day = c(2,5,7,9,12,14,16,19,21,23,26,28,30,33,35,
+                         37,40,42,44,47,49,51,54,56,58,61,63,65,68,70,
+                         72,75,77,79,82,84,86,89,91,93,96,98,100,103,105,
+                         107,110,112,114,117,119,121,124,126,128,131))
+  )
+
+
+```
+
+Now lets join to the `users` table
+
+```{r finalJoin, eval=F}
+responsesWithSchedule %>%
+  # Join to user table
+  inner_join(users) %>%
+  
+  # Clean up the table
+  select(userID, everything()) %>%                # reorder vars
+  rename(ReplyType=msgType.rec, DateSent=date,     # rename vars
+         Type=`Msg Type`, campg.num=Number) %>% 
+  select(-nn, -status.user, -phone_number) %>%                   # drop vars
+  
+  # Removes messages that were sent after they opted out
+  filter(campg.day < SurvEnd) %>%
+  write_rds("Data/MergedDf2.RDS")
+
+# masterDf <- readRDS("Data/MergedDf2.RDS")
+```
+
+
+```{r writeUsers}
+users %>%
+  select(-phone_number, -zipcode) %>% # drop their phone number & zipcodde from RDS
+  write_rds("Data/users.RDS") # these are still in the CSV files
+```
+
+```{r survival}
+survObj <- Surv(time=users$SurvEnd, event=users$Censor) # not including any event data
+
+survfit(survObj ~ 1, data = users) %>%
+  ggsurv() + scale_y_continuous(labels = scales::percent)# + scale_x_continuous(limits=c(0,200))
+  ggsurvplot(data = users, pval=T, #conf.int=T,
+             risk.table = TRUE,
+             fun = "pct",
+             size = 1,
+             legend = "bottom") 
+```
+
+
+```{r}
+responsesWithSchedule %>% 
+  filter(!is.na(CorAns), !is.na(Response)) %>%
+  mutate(gotRight = as.factor(gotRight)) %>%
+  ggplot(aes(x=mid, fill=msgType.rec)) + 
+  # geom_bar(position = "fill") +
+  geom_bar() +
+  coord_flip()
+```
+
