@@ -1,0 +1,17 @@
+.httr-oauth
+.RData
+.Rhistory
+.Rproj.user
+.Renviron
+.DS_Store
+Private_data
+*.Rproj
+/rsconnect
+
+# HTML, png, pdf
+*.html
+*.png
+*.pdf
+
+# Data
+Data/
